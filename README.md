@@ -1,154 +1,197 @@
-import { sha1 } from "https://denopkg.com/chiefbiiko/sha1/mod.ts";
+import { TableDecoder } from './table-decoder.ts';
 
-export class TableDecoder {
+// let fd = fs.openSync( ".\\bsdte3l_prod.txt", 'r' );
 
-  static decodeHeader(reg: string): any {
-    let decoder = new TableDecoder(reg);
-    let tab: any = {};
+let file = (Deno.args.length >= 2 ) ? Deno.args[2] : ".\\bsdte2l_prod.txt";
 
-    let dataLen = parseInt(decoder.readAsNumber(3));
-    if (dataLen + 3 < reg.length)
-      throw new Error("Register length " + dataLen + " too large");
+let data = Deno.readFileSync(file);
+//console.log( data );
 
-    tab.ID = decoder.readAsNumber(1);
-    tab.ACQ = decoder.readAsNumber(2);
-    tab.RECIDX = decoder.readAsNumber(2);
+let lines = new TextDecoder().decode(data).split('\n');
 
-    return tab;
+console.log( lines.length );
+
+interface TableReg {
+  source: string;
+  dataReg: string;
+  scheme: number;
+  profile: number;
+  index: number;
+  appParams: { [index: string]: string }
+}
+
+let info: {
+  regs: TableReg[];
+  profiles: number[];
+  schemes: number[];
+} = {
+  regs: [],
+  profiles: [],
+  schemes: [],
+}
+
+for( let line of lines ) {
+  if ( line.startsWith( "BNJ") && !line.startsWith( "BNJF00001" )) {
+    let sansHeader = line.slice( "BNJF00002                                 00".length );
+
+    if ( sansHeader[ 12 ] == "1" ) { // AID
+      let dataReg = sansHeader.slice( 9 );
+      let reg: TableReg;
+
+      let scheme = Number.parseInt( sansHeader.substr( 3, 3 ) );
+      let profile = Number.parseInt( sansHeader.substr( 6, 3 ) );
+
+      info.schemes[ scheme ] = ( info.schemes[ scheme ] ?? 0 ) + 1;
+      info.profiles[ profile ] = ( info.profiles[ profile ] ?? 0 ) + 1;
+
+      let appParams = TableDecoder.decodeAID( dataReg );
+
+      reg = {
+        source: sansHeader,
+        dataReg,
+        scheme,
+        profile,
+        index: Number.parseInt( appParams.RECIDX ),
+        appParams
+       };
+
+      info.regs.push( reg );
+    }
+  }
+}
+
+
+/**
+ * Check that Indexes are unique within each profile
+ */
+let indexByProfile = new Map<number,number[]>();
+
+info.regs.forEach( reg => {
+  let profile = reg.profile;
+
+  if ( !indexByProfile.has( profile ) )
+    indexByProfile.set( profile, [] );
+
+  indexByProfile.get( profile )?.push( reg.index );
+});
+
+indexByProfile.forEach( ( indexes, profile ) => {
+  if ( arrayHasDuplicates( indexes ) ) {
+    console.log( "** Profile " + profile + " has duplicate indexes ");
+    console.log( indexes.join( ',') )
+  }
+})
+
+/**
+ * Validate each AID
+ */
+let byAID: Map<string, TableReg[]> = new Map<string, TableReg[]>();
+
+info.regs.forEach( reg => {
+  let aid = reg.appParams.AID;
+
+  if ( !byAID.has( aid ) )
+    byAID.set( aid, [] );
+
+  byAID.get( aid )?.push( reg );
+})
+
+let str = "AID ".padEnd( 20, " ")
+        + "LABEL".padEnd( 16, " ");
+
+for( let profile in info.profiles ) {
+  str += "  " + (profile + "").padEnd( 2 );
+}
+str += " PMT CTL"
+
+//console.log( str );
+
+byAID.forEach( (regs, aid ) => {
+  let str = aid.padEnd( 20, " ") + regs[0].appParams.DEFLABEL.padEnd(16);
+
+  for( let profile in info.profiles ) {
+    let has = regs.some( reg => {
+//      console.log( reg.scheme )
+      return reg.profile == Number.parseInt(profile);
+    });
+
+    str += (has) ? "  X " : "  . ";
   }
 
-  static decodeAID(reg: string): any {
-    let decoder = new TableDecoder(reg);
-    let tab: any = {};
+  let schemes = regs
+    .map( (reg) => reg.scheme)
+    .filter( (item, pos, arr) => {
+      return arr.indexOf(item)== pos;
+    })
+    .map( (scheme) => scheme.toString().padStart(3, "0") )
+    .join( ",");
 
-    let dataLen = parseInt(decoder.readAsNumber(3));
-    if ((dataLen != 284) && (dataLen != 314))
-      throw new Error("Register length " + dataLen + " not valid");
+  str += " " + schemes;
 
-    if (decoder.read(1) != "1")
-      throw new Error("Not an AID table");
+  let ctmodes = regs
+    .map( (reg) => reg.appParams.CTLSMODE)
+    .filter( (item, pos, arr) => {
+      return arr.indexOf(item)== pos && (item != " ");
+    })
+    .map( (ctmode) => ctmode.toString() )
+    .join( ",");
 
-    tab.RECLEN = dataLen;
+  str += " " + ctmodes;
 
-    tab.ACQ = decoder.readAsNumber(2);
-    tab.RECIDX = decoder.readAsNumber(2);
+//  console.log( str );
 
-    let aidLen = parseInt(decoder.readAsNumber(2));
-    tab.AID = decoder.read(2 * aidLen);
-    decoder.skip(32 - 2 * aidLen);
+  let duplProfile = regs.some( (reg, pos, regs) => {
+    return regs.some( (reg2, pos2) => {
+      return pos != pos2
+          && reg.profile == reg2.profile;
+    } )
+  });
+  if ( duplProfile ) {
+    console.log( "^^^^DUPLICATE PROFILE^^^^")
+  }
 
-    tab.APPTYPE = decoder.readAsNumber(2);
-    tab.DEFLABEL = decoder.read(16);
-    tab.ICCSTD = decoder.readAsNumber(2);
+  let inconsScheme = regs.some( (reg, pos, regs) => {
+    return regs.some( (reg2, pos2) => {
+      return pos != pos2
+          && reg.scheme != reg2.scheme;
+    } )
+  });
+  if ( inconsScheme ) {
+    console.log( "^^^^SCHEME INCONSISTENT^^^^")
+  }
 
-    tab.APPVER1 = decoder.readAsHex(4);
-    tab.APPVER2 = decoder.readAsHex(4);
-    tab.APPVER3 = decoder.readAsHex(4);
+  let firstDiff = true;
 
-    tab.TRMCNTRY = decoder.readAsNumber(3);
-    tab.TRMCURR = decoder.readAsNumber(3);
-    tab.TRMCRREXP = decoder.readAsNumber(1);
-    tab.MERCHID = decoder.read(15);
-    tab.MCC = decoder.readAsNumber(4);
-    tab.TRMID = decoder.read(8);
-    tab.TRMCAPAB = decoder.readAsHex(6);
-    tab.ADDTRMCP = decoder.readAsHex(10);
-    tab.TRMTYP = decoder.readAsNumber(2);
-    tab.TACDEF = decoder.readAsHex(10);
-    tab.TACDEN = decoder.readAsHex(10);
-    tab.TACONL = decoder.readAsHex(10);
+/*  let diffRegs = regs.filter( ( reg, index ) => {
+    let baseReg = regs[1].dataReg.slice(8, Number.parseInt( regs[1].appParams.RECLEN ) );
+    let thisReg = reg.dataReg.slice(8, Number.parseInt( reg.appParams.RECLEN ) );
 
-    tab.FLRLIMIT = decoder.readAsHex(8);
-    tab.TCC = decoder.readAsHex(1);
-    tab.CTLSZEROAM = decoder.readAsHex(1);
-    tab.CTLSMODE = decoder.readAsHex(1);
-    tab.CTLSTRNLIM = decoder.readAsHex(8);
-    tab.CTLSFLRLIM = decoder.readAsHex(8);
-    tab.CTLSCVMLIM = decoder.readAsHex(8);
-    tab.CTLSAPPVER = decoder.readAsHex(4);
-    decoder.skip(1)
-    tab.TDOLDEF = decoder.readAsHex(40);
-    tab.DDOLDEF = decoder.readAsHex(40);
-    tab.ARCOFFLN = decoder.read(8);
-    if (dataLen > 284) {
-      tab.CTLSTACDEF = decoder.readAsHex(10);
-      tab.CTLSTACDEN = decoder.readAsHex(10);
-      tab.CTLSTACONL = decoder.readAsHex(10);
+    if ( index != 1 ) {
+      if ( firstDiff ) {
+        firstDiff = false;
+        console.log( regs[1].profile.toString().padStart(3,'0') + ":" + baseReg );
+      }
+
+      console.log( "    " + Array.from(thisReg).map( (ch,index) => {
+        return ( baseReg[ index ] == ch ) ? ' ' : '*';
+      }).join( '' ))
+      
+      console.log( reg.profile.toString().padStart(3,'0') + ":" + thisReg );
     }
 
-    return tab;
-  }
+    return ( index > 0 ) && baseReg != thisReg;
+  } )
 
-  static decodeCAPK(reg: string): any {
-    let decoder = new TableDecoder(reg);
-    let tab: any = {};
+  if ( diffRegs.length > 0 ) {
+    console.log( "^^^^REGISTERS DIFFER^^^^" + diffRegs.map( (reg) => reg.profile ).join(','))
+  }*/
 
-    let dataLen = parseInt(decoder.readAsNumber(3));
-    if ((dataLen != 611))
-      throw new Error("Register length " + dataLen + " not valid");
+})
 
-    if (decoder.read(1) != "2")
-      throw new Error("Not an CAPK table");
-
-    tab.RECLEN = dataLen;
-
-    tab.ACQ = decoder.readAsNumber(2);
-    tab.RECIDX = decoder.readAsNumber(2);
-
-    tab.AID = decoder.read(2 * 5);
-    tab.CAPKINDEX = decoder.read(2);
-
-    const expLen = parseInt(decoder.readAsNumber(3));
-    tab.EXP = decoder.read(2 * expLen);
-    decoder.skip(2 * (3 - expLen));
-
-    const modLen = parseInt(decoder.readAsNumber(3));
-    tab.MOD = decoder.read(2 * modLen);
-    decoder.skip(2 * (248 - modLen));
-
-    tab.HASHTYPE = decoder.readAsNumber(1);
-    tab.HASH = decoder.readAsHex( 2 * 32 );
-
-    tab.__SHA1 = (sha1(tab.AID+tab.CAPKINDEX+tab.MOD+tab.EXP,"hex","hex") as string).toUpperCase();
-    return tab;
-  }
+// Check Indexes
+//info.regs.
 
 
-  private reg: string;
-  private offset: number = 0;
-
-  constructor(reg: string) {
-    this.reg = reg;
-    this.rewind();
-  }
-
-  rewind() {
-    this.offset = 0;
-  }
-
-  skip(len: number) {
-    this.offset += len;
-  }
-
-  read(len: number): string {
-    let val = this.reg.substring(this.offset, this.offset + len);
-    //    console.log( "read '" + val + "'");
-    this.offset += len;
-
-    return val;
-  }
-
-  readAsHex(len: number): string {
-    return this.read(len);
-  }
-
-  readAsNumber(len: number): string {
-    return this.read(len);
-  }
-
-  /*  readAsNumber( len: number ): number {
-      let num = parseInt( this.read(len) );
-  
-      return num;
-    }*/
+function arrayHasDuplicates<U>( arr: U[] ) {
+  return arr.length !== new Set(arr).size;
 }
